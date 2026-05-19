@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="utf-8" />
+	<title>xterm-pty Go/Wasm example</title>
+	<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+	<style>
+		html,
+		body,
+		#terminal {
+			height: 100%;
+		}
+
+		body {
+			margin: 0;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="terminal"></div>
+	<script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+	<script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+	<script src="../../index.js"></script>
+	<script src="./wasm_exec.js"></script>
+	<script>
+		const terminalElement = document.getElementById('terminal');
+		const xterm = new Terminal({ cursorBlink: true });
+		xterm.open(terminalElement);
+
+		const { master, slave } = openpty();
+		xterm.loadAddon(master);
+
+		const fitAddon = new FitAddon.FitAddon();
+		xterm.loadAddon(fitAddon);
+		new ResizeObserver(() => fitAddon.fit()).observe(terminalElement);
+		fitAddon.fit();
+
+		const decoder = new TextDecoder();
+
+		globalThis.goPty = {
+			write(text) {
+				slave.write(text);
+			},
+			onData(callback) {
+				return slave.onReadable(() => {
+					callback(decoder.decode(Uint8Array.from(slave.read())));
+				});
+			},
+			onResize(callback) {
+				return slave.onSignal((signal) => {
+					if (signal !== 'SIGWINCH') return;
+					const [cols, rows] = slave.ioctl('TIOCGWINSZ');
+					callback(cols, rows);
+				});
+			},
+			getSize() {
+				const [cols, rows] = slave.ioctl('TIOCGWINSZ');
+				return { cols, rows };
+			},
+		};
+
+		async function loadWasm(url, importObject) {
+			const response = await fetch(url);
+			if (WebAssembly.instantiateStreaming) {
+				try {
+					return await WebAssembly.instantiateStreaming(response.clone(), importObject);
+				} catch (error) {
+					const contentType = response.headers.get('Content-Type') || '';
+					if (!contentType.startsWith('application/wasm')) {
+						console.warn('Falling back to ArrayBuffer instantiation because the server did not serve application/wasm.', error);
+					} else {
+						throw error;
+					}
+				}
+			}
+			return await WebAssembly.instantiate(await response.arrayBuffer(), importObject);
+		}
+
+		const go = new Go();
+		loadWasm('./main.wasm', go.importObject)
+			.then(({ instance }) => go.run(instance))
+			.catch((error) => {
+				console.error(error);
+				slave.write(`failed to start Go/Wasm: ${error}\r\n`);
+			});
+	</script>
+</body>
+
+</html>

@@ -112,6 +112,32 @@ npx http-server
 - [examples/module-example](https://github.com/mame/xterm-pty/tree/main/examples/module-example): A complete code example.
 - [examples/classic-example](https://github.com/mame/xterm-pty/tree/main/examples/classic-example): Same example, but using classic script instead of ESM.
 - [examples/vite-example](https://github.com/mame/xterm-pty/tree/main/examples/vite-example): An example of a vite project for xterm-pty and emscripten.
+- [examples/go-wasm-example](https://github.com/mame/xterm-pty/tree/main/examples/go-wasm-example): A `wasm_exec.js` example for Go/Wasm, including terminal resize support.
+
+## Go/Wasm integration (`wasm_exec.js`)
+
+`wasm_exec.js` does not provide the same TTY hooks as the Emscripten runtime, so the simplest integration is to keep `xterm-pty` on the JavaScript side and expose a tiny bridge to Go via `syscall/js`.
+
+The bridge usually needs four operations:
+
+- `write(text)`: write Go output to the PTY slave
+- `onData(callback)`: forward cooked terminal input from `slave.read()`
+- `onResize(callback)`: forward `SIGWINCH`
+- `getSize()`: read `slave.ioctl("TIOCGWINSZ")`
+
+The important part for resize support is:
+
+1. load `master` into xterm.js,
+2. call `fitAddon.fit()` after `master` is attached,
+3. watch the terminal container with `ResizeObserver`,
+4. on `SIGWINCH`, read the latest `[cols, rows]` from `slave.ioctl("TIOCGWINSZ")`.
+
+See [examples/go-wasm-example](https://github.com/mame/xterm-pty/tree/main/examples/go-wasm-example) for a complete browser example with:
+
+- `wasm_exec.js`
+- `syscall/js`
+- line-oriented terminal input
+- resize notifications printed from Go code
 
 ### Details
 
