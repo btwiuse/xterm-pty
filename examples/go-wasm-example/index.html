@@ -24,25 +24,29 @@
 
 		// Buffer holding bytes received from the slave that Go has not yet read
 		let stdinBuffer = [];
-		// Pending Go fs.read() call waiting for stdin data
-		let stdinWaiter = null;
+		// Queue of pending Go fs.read() calls waiting for stdin data.
+		// More than one goroutine may simultaneously block on a read, so a queue
+		// is needed to avoid silently dropping earlier requests.
+		const stdinWaiters = [];
 
-		// Drain slave readable data into stdinBuffer, or hand it directly to a
-		// waiting Go fs.read() callback if one is already registered.
+		// Satisfy as many queued waiters as possible from stdinBuffer, then store
+		// any leftover bytes back in stdinBuffer.
+		function drainStdinWaiters() {
+			while (stdinWaiters.length > 0 && stdinBuffer.length > 0) {
+				const { buffer, offset, length, callback } = stdinWaiters.shift();
+				const n = Math.min(stdinBuffer.length, length);
+				const data = stdinBuffer.splice(0, n);
+				for (let i = 0; i < n; i++) buffer[offset + i] = data[i];
+				callback(null, n);
+			}
+		}
+
+		// Drain slave readable data into stdinBuffer and satisfy any waiters.
 		slave.onReadable(() => {
 			const data = slave.read();
 			if (data.length === 0) return;
-
-			if (stdinWaiter) {
-				const { buffer, offset, length, callback } = stdinWaiter;
-				stdinWaiter = null;
-				const n = Math.min(data.length, length);
-				for (let i = 0; i < n; i++) buffer[offset + i] = data[i];
-				if (n < data.length) stdinBuffer.push(...data.slice(n));
-				callback(null, n);
-			} else {
-				stdinBuffer.push(...data);
-			}
+			stdinBuffer.push(...data);
+			drainStdinWaiters();
 		});
 
 		// Route Go stdout/stderr (fd 1 and fd 2) to the xterm-pty slave.
@@ -62,14 +66,8 @@
 		const origRead = globalThis.fs.read.bind(globalThis.fs);
 		globalThis.fs.read = function(fd, buffer, offset, length, position, callback) {
 			if (fd === 0) {
-				if (stdinBuffer.length > 0) {
-					const n = Math.min(stdinBuffer.length, length);
-					const data = stdinBuffer.splice(0, n);
-					for (let i = 0; i < n; i++) buffer[offset + i] = data[i];
-					callback(null, n);
-				} else {
-					stdinWaiter = { buffer, offset, length, callback };
-				}
+				stdinWaiters.push({ buffer, offset, length, callback });
+				drainStdinWaiters();
 				return;
 			}
 			origRead(fd, buffer, offset, length, position, callback);
