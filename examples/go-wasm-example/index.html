@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<link rel="stylesheet" href="https://unpkg.com/@xterm/xterm/css/xterm.css" />
+</head>
+
+<body>
+	<div id="terminal"></div>
+	<script src="https://unpkg.com/@xterm/xterm/lib/xterm.js"></script>
+	<script src="https://unpkg.com/xterm-pty/index.js"></script>
+	<!-- Copy wasm_exec.js from your Go installation:
+	     cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" . -->
+	<script src="wasm_exec.js"></script>
+	<script>
+		const xterm = new Terminal();
+		xterm.open(document.getElementById("terminal"));
+
+		// Create master/slave objects
+		const { master, slave } = openpty();
+
+		// Connect the master object to xterm.js
+		xterm.loadAddon(master);
+
+		// Buffer holding bytes received from the slave that Go has not yet read
+		let stdinBuffer = [];
+		// Pending Go fs.read() call waiting for stdin data
+		let stdinWaiter = null;
+
+		// Drain slave readable data into stdinBuffer, or hand it directly to a
+		// waiting Go fs.read() callback if one is already registered.
+		slave.onReadable(() => {
+			const data = slave.read();
+			if (data.length === 0) return;
+
+			if (stdinWaiter) {
+				const { buffer, offset, length, callback } = stdinWaiter;
+				stdinWaiter = null;
+				const n = Math.min(data.length, length);
+				for (let i = 0; i < n; i++) buffer[offset + i] = data[i];
+				if (n < data.length) stdinBuffer.push(...data.slice(n));
+				callback(null, n);
+			} else {
+				stdinBuffer.push(...data);
+			}
+		});
+
+		// Route Go stdout/stderr (fd 1 and fd 2) to the xterm-pty slave.
+		// wasm_exec.js sets up globalThis.fs; we patch it before running Go.
+		// go's fs.write() calls this.writeSync(), so patching writeSync is enough.
+		const origWriteSync = globalThis.fs.writeSync.bind(globalThis.fs);
+		globalThis.fs.writeSync = function(fd, buf) {
+			if (fd === 1 || fd === 2) {
+				slave.write(Array.from(buf));
+				return buf.length;
+			}
+			return origWriteSync(fd, buf);
+		};
+
+		// Route Go stdin (fd 0) reads to the xterm-pty slave.
+		// The default wasm_exec.js returns ENOSYS for all reads; replace it.
+		const origRead = globalThis.fs.read.bind(globalThis.fs);
+		globalThis.fs.read = function(fd, buffer, offset, length, position, callback) {
+			if (fd === 0) {
+				if (stdinBuffer.length > 0) {
+					const n = Math.min(stdinBuffer.length, length);
+					const data = stdinBuffer.splice(0, n);
+					for (let i = 0; i < n; i++) buffer[offset + i] = data[i];
+					callback(null, n);
+				} else {
+					stdinWaiter = { buffer, offset, length, callback };
+				}
+				return;
+			}
+			origRead(fd, buffer, offset, length, position, callback);
+		};
+
+		// Load and run the Go wasm binary
+		const go = new Go();
+		WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject).then(result => {
+			go.run(result.instance);
+		});
+	</script>
+</body>
+
+</html>
